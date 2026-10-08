@@ -25,20 +25,20 @@
         .tab { flex: 1; text-align: center; padding: 12px; background: #eee; cursor: pointer; font-weight: bold; border-right: 1px solid #ccc; }
         .tab:last-child { border-right: none; }
         .tab.active { background: #2196F3; color: white; }
-
+        
         .color-selectors { display: flex; justify-content: space-between; margin-bottom: 12px; }
         .btn-color { flex: 1; margin: 0 4px; padding: 10px 0; border: none; border-radius: 6px; color: white; font-weight: bold; cursor: pointer; opacity: 0.4; }
         .btn-color.active { opacity: 1; border: 2px solid #000; }
-
+        
         .number-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 16px; }
         .btn-num { padding: 12px 0; font-size: 16px; font-weight: bold; border: 1px solid #ddd; border-radius: 6px; background: #fff; cursor: pointer; }
         .btn-num:active { background: #eee; }
-
+        
         .btn-action { width: 100%; padding: 14px; font-size: 16px; font-weight: bold; color: white; background: #4CAF50; border: none; border-radius: 8px; cursor: pointer; margin-top: 10px; }
         .btn-action.secondary { background: #2196F3; }
-
+        
         .card-list { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px; background: #fafafa; border: 1px solid #eee; border-radius: 8px; min-height: 80px; align-items: flex-start; align-content: flex-start;}
-
+        
         /* The Rummikub Card Design */
         .card {
             width: 40px; height: 55px; border-radius: 6px; display: flex; justify-content: center; align-items: center;
@@ -58,11 +58,11 @@
 
         .hidden { display: none; }
         .loading { text-align: center; font-size: 18px; font-weight: bold; color: #666; margin: 20px 0; }
-
+        
         .result-section { margin-top: 20px; }
         .result-section h3 { margin-bottom: 8px; border-bottom: 2px solid #ddd; padding-bottom: 4px; }
         .formation { background: #fffde7; border-left: 4px solid #ffeb3b; padding: 8px 12px; margin-bottom: 8px; font-family: monospace; font-size: 14px;}
-
+        
         #timeout-banner {
             background: #fff3cd; color: #856404; padding: 12px; border-radius: 8px; margin-bottom: 16px;
             font-size: 14px; border: 1px solid #ffeeba; font-weight: bold; text-align: center;
@@ -73,7 +73,7 @@
 
 <div class="container">
     <h1>Rummikub Solver</h1>
-
+    
     <div class="tabs" id="tabs">
         <div class="tab active" onclick="switchTab('table')">1. Table Cards</div>
         <div class="tab" onclick="switchTab('hand')">2. Hand Cards</div>
@@ -104,7 +104,7 @@
     <div id="loading-screen" class="hidden loading">
         <div id="progress-text">Initializing search...</div>
         <small style="color:#888; font-weight: normal; margin-top: 8px; display:block;">
-            Running exhaustive search for the absolute maximum card play.
+            Running exact cover solver with MRV heuristics.
         </small>
         <button class="btn-action" style="margin-top:15px; background-color:#d32f2f;" onclick="triggerCancel()">
             Stop & Show Best Found So Far
@@ -123,7 +123,7 @@
             <div class="card-list" id="used-list"></div>
         </div>
         <div class="result-section">
-            <h3>New Table Formations</h3>
+            <h3>New Table Formations (<span id="formations-count"></span>)</h3>
             <div id="formations-list"></div>
         </div>
         <button class="btn-action secondary" style="margin-top:20px;" onclick="resetToEdit()">Back to Edit Cards</button>
@@ -134,7 +134,7 @@
 <script>
     // --- 1. GLOBAL STATE ---
     let currentTab = 'table';
-    let selectedColor = 0;
+    let selectedColor = 0; 
     let tableCards = [];
     let handCards = [];
     let idCounter = 0;
@@ -142,20 +142,236 @@
     const COLORS = ["red", "blue", "black", "orange", "joker"];
     const COLOR_NAMES = ["RED", "BLUE", "BLACK", "ORANGE"];
 
-    // Safety fallback step counters
-    let partitionSteps = 0;
-    const MAX_PARTITION_STEPS = 20000;
+    // Helper: Map color (0..3) and value (1..13) to flat index 0..51
+    function tileIdx(c, v) {
+        return c * 13 + (v - 1);
+    }
 
-    // --- 2. MATH & SOLVER HELPERS ---
+    // --- 2. PRECOMPUTED SET TEMPLATES (Exact Cover Algorithm X) ---
+    const ALL_SET_TEMPLATES = [];
+    const SETS_BY_TILE = Array.from({ length: 52 }, () => []);
 
-    // Filters out completely unplayable cards to shrink search trees
+    (function buildSetTemplates() {
+        // Runs of length 3, 4, 5 (Any longer run decomposes into combinations of 3, 4, 5)
+        for (let c = 0; c < 4; c++) {
+            for (let start = 1; start <= 11; start++) {
+                for (let len = 3; len <= 5; len++) {
+                    let end = start + len - 1;
+                    if (end > 13) continue;
+
+                    // 0 Jokers
+                    let r0 = [];
+                    for (let v = start; v <= end; v++) r0.push(tileIdx(c, v));
+                    let idx0 = ALL_SET_TEMPLATES.length;
+                    ALL_SET_TEMPLATES.push({
+                        name: `Run: ${COLOR_NAMES[c]} ${start} to ${end}`,
+                        tiles: r0,
+                        jokers: 0
+                    });
+                    for (let ti of r0) SETS_BY_TILE[ti].push(idx0);
+
+                    // 1 Joker
+                    for (let j1 = start; j1 <= end; j1++) {
+                        let r1 = [];
+                        for (let v = start; v <= end; v++) if (v !== j1) r1.push(tileIdx(c, v));
+                        let idx1 = ALL_SET_TEMPLATES.length;
+                        ALL_SET_TEMPLATES.push({
+                            name: `Run: ${COLOR_NAMES[c]} ${start} to ${end} (used 1 Joker)`,
+                            tiles: r1,
+                            jokers: 1
+                        });
+                        for (let ti of r1) SETS_BY_TILE[ti].push(idx1);
+                    }
+
+                    // 2 Jokers
+                    for (let j1 = start; j1 <= end; j1++) {
+                        for (let j2 = j1 + 1; j2 <= end; j2++) {
+                            let r2 = [];
+                            for (let v = start; v <= end; v++) if (v !== j1 && v !== j2) r2.push(tileIdx(c, v));
+                            let idx2 = ALL_SET_TEMPLATES.length;
+                            ALL_SET_TEMPLATES.push({
+                                name: `Run: ${COLOR_NAMES[c]} ${start} to ${end} (used 2 Jokers)`,
+                                tiles: r2,
+                                jokers: 2
+                            });
+                            for (let ti of r2) SETS_BY_TILE[ti].push(idx2);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Groups of size 3 and 4
+        for (let v = 1; v <= 13; v++) {
+            // Size 4 (0 Jokers)
+            let g4 = [tileIdx(0, v), tileIdx(1, v), tileIdx(2, v), tileIdx(3, v)];
+            let idx4 = ALL_SET_TEMPLATES.length;
+            ALL_SET_TEMPLATES.push({
+                name: `Group: Number ${v} [all 4]`,
+                tiles: g4,
+                jokers: 0
+            });
+            for (let ti of g4) SETS_BY_TILE[ti].push(idx4);
+
+            // Size 4 (1 Joker)
+            for (let mc = 0; mc < 4; mc++) {
+                let g4_1 = [];
+                for (let c = 0; c < 4; c++) if (c !== mc) g4_1.push(tileIdx(c, v));
+                let idx4_1 = ALL_SET_TEMPLATES.length;
+                ALL_SET_TEMPLATES.push({
+                    name: `Group: Number ${v} [4 with 1 Joker]`,
+                    tiles: g4_1,
+                    jokers: 1
+                });
+                for (let ti of g4_1) SETS_BY_TILE[ti].push(idx4_1);
+            }
+
+            // Size 4 (2 Jokers)
+            for (let c1 = 0; c1 < 4; c1++) {
+                for (let c2 = c1 + 1; c2 < 4; c2++) {
+                    let g4_2 = [tileIdx(c1, v), tileIdx(c2, v)];
+                    let idx4_2 = ALL_SET_TEMPLATES.length;
+                    ALL_SET_TEMPLATES.push({
+                        name: `Group: Number ${v} [4 with 2 Jokers]`,
+                        tiles: g4_2,
+                        jokers: 2
+                    });
+                    for (let ti of g4_2) SETS_BY_TILE[ti].push(idx4_2);
+                }
+            }
+
+            // Size 3 (0 Jokers)
+            const combs3 = [[0,1,2], [0,1,3], [0,2,3], [1,2,3]];
+            for (let comb of combs3) {
+                let g3 = comb.map(c => tileIdx(c, v));
+                let cNames = comb.map(c => COLOR_NAMES[c]).join(", ");
+                let idx3 = ALL_SET_TEMPLATES.length;
+                ALL_SET_TEMPLATES.push({
+                    name: `Group: Number ${v} [${cNames}]`,
+                    tiles: g3,
+                    jokers: 0
+                });
+                for (let ti of g3) SETS_BY_TILE[ti].push(idx3);
+            }
+
+            // Size 3 (1 Joker)
+            for (let c1 = 0; c1 < 4; c1++) {
+                for (let c2 = c1 + 1; c2 < 4; c2++) {
+                    let g3_1 = [tileIdx(c1, v), tileIdx(c2, v)];
+                    let cNames = `${COLOR_NAMES[c1]}, ${COLOR_NAMES[c2]}`;
+                    let idx3_1 = ALL_SET_TEMPLATES.length;
+                    ALL_SET_TEMPLATES.push({
+                        name: `Group: Number ${v} [${cNames} + 1 Joker]`,
+                        tiles: g3_1,
+                        jokers: 1
+                    });
+                    for (let ti of g3_1) SETS_BY_TILE[ti].push(idx3_1);
+                }
+            }
+
+            // Size 3 (2 Jokers)
+            for (let c1 = 0; c1 < 4; c1++) {
+                let g3_2 = [tileIdx(c1, v)];
+                let idx3_2 = ALL_SET_TEMPLATES.length;
+                ALL_SET_TEMPLATES.push({
+                    name: `Group: Number ${v} [${COLOR_NAMES[c1]} + 2 Jokers]`,
+                    tiles: g3_2,
+                    jokers: 2
+                });
+                for (let ti of g3_2) SETS_BY_TILE[ti].push(idx3_2);
+            }
+        }
+    })();
+
+    // --- 3. KNUTH'S ALGORITHM X WITH MRV HEURISTIC ---
+    let mrvSteps = 0;
+    const MAX_MRV_STEPS = 50000;
+
+    function partitionMRV(remCounts, jokersLeft) {
+        mrvSteps++;
+        if (mrvSteps > MAX_MRV_STEPS) return null;
+
+        let bestTile = -1;
+        let minOptions = 999999;
+        let bestCandidateSets = null;
+        let tilesRemaining = false;
+
+        // MRV: Pick the remaining tile that has the FEWEST possible sets that can cover it
+        for (let i = 0; i < 52; i++) {
+            if (remCounts[i] > 0) {
+                tilesRemaining = true;
+                let cand = [];
+                let sets = SETS_BY_TILE[i];
+                for (let s = 0; s < sets.length; s++) {
+                    let sIdx = sets[s];
+                    let tmpl = ALL_SET_TEMPLATES[sIdx];
+                    if (tmpl.jokers <= jokersLeft) {
+                        let feasible = true;
+                        for (let t = 0; t < tmpl.tiles.length; t++) {
+                            if (remCounts[tmpl.tiles[t]] === 0) {
+                                feasible = false;
+                                break;
+                            }
+                        }
+                        if (feasible) cand.push(sIdx);
+                    }
+                }
+
+                if (cand.length === 0) return null; // Dead end: Immediate prune!
+
+                if (cand.length < minOptions) {
+                    minOptions = cand.length;
+                    bestTile = i;
+                    bestCandidateSets = cand;
+                    if (minOptions === 1) break; // Cannot get fewer than 1 choice
+                }
+            }
+        }
+
+        if (!tilesRemaining) {
+            let res = [];
+            if (jokersLeft > 0) res.push(`Leftover Jokers: ${jokersLeft} (attach to any valid set)`);
+            return res;
+        }
+
+        // Branch on the best candidate sets for the most constrained tile
+        for (let c = 0; c < bestCandidateSets.length; c++) {
+            let sIdx = bestCandidateSets[c];
+            let tmpl = ALL_SET_TEMPLATES[sIdx];
+
+            if (tmpl.jokers > jokersLeft) continue;
+            let canTake = true;
+            for (let t = 0; t < tmpl.tiles.length; t++) {
+                if (remCounts[tmpl.tiles[t]] === 0) {
+                    canTake = false;
+                    break;
+                }
+            }
+            if (!canTake) continue;
+
+            // Consume tiles
+            for (let t = 0; t < tmpl.tiles.length; t++) remCounts[tmpl.tiles[t]]--;
+
+            let subRes = partitionMRV(remCounts, jokersLeft - tmpl.jokers);
+            if (subRes !== null) {
+                return [tmpl.name].concat(subRes);
+            }
+
+            // Backtrack
+            for (let t = 0; t < tmpl.tiles.length; t++) remCounts[tmpl.tiles[t]]++;
+        }
+
+        return null;
+    }
+
+    // --- 4. COMBINATIONS ITERATOR & PRUNING ---
     function pruneHand(table, hand) {
-        let poolCounts = Array.from({length: 4}, () => new Array(14).fill(0));
+        let poolCounts = new Array(52).fill(0);
         let poolJokers = 0;
 
         for (let t of table.concat(hand)) {
             if (t.isJoker) poolJokers++;
-            else poolCounts[t.color][t.value]++;
+            else poolCounts[tileIdx(t.color, t.value)]++;
         }
 
         let prunedHand = [];
@@ -170,26 +386,21 @@
             let canGroup = false;
             let canRun = false;
 
-            // Group check (Same value, different colors)
+            // Group check
             let colorsOfVal = 0;
             for (let c = 0; c < 4; c++) {
-                if (poolCounts[c][t.value] > 0) colorsOfVal++;
+                if (poolCounts[tileIdx(c, t.value)] > 0) colorsOfVal++;
             }
-            if (colorsOfVal + poolJokers >= 3) {
-                canGroup = true;
-            }
+            if (colorsOfVal + poolJokers >= 3) canGroup = true;
 
-            // Run check (Consecutive values, same color)
+            // Run check
             if (!canGroup) {
                 for (let start = Math.max(1, t.value - 2); start <= t.value; start++) {
                     let end = start + 2;
                     if (end > 13) continue;
-
                     let missing = 0;
                     for (let v = start; v <= end; v++) {
-                        if (poolCounts[t.color][v] === 0) {
-                            missing++;
-                        }
+                        if (poolCounts[tileIdx(t.color, v)] === 0) missing++;
                     }
                     if (missing <= poolJokers) {
                         canRun = true;
@@ -198,17 +409,13 @@
                 }
             }
 
-            if (canGroup || canRun) {
-                prunedHand.push(t);
-            } else {
-                unplayableHand.push(t);
-            }
+            if (canGroup || canRun) prunedHand.push(t);
+            else unplayableHand.push(t);
         }
 
         return { prunedHand, unplayableHand };
     }
 
-    // Standard ES5 Iterator Object (Universal browser compatibility, 0% memory overhead)
     function createCombinationsIterator(array, k) {
         const n = array.length;
         if (k > n || k < 0) return { next: () => ({ done: true }) };
@@ -224,21 +431,21 @@
                 }
             };
         }
-
+        
         let indices = Array.from({length: k}, (_, i) => i);
         let first = true;
-
+        
         return {
             next: () => {
                 if (first) {
                     first = false;
                     return { value: indices.map(i => array[i]), done: false };
                 }
-
+                
                 let i = k - 1;
                 while (i >= 0 && indices[i] === i + n - k) i--;
                 if (i < 0) return { done: true };
-
+                
                 indices[i]++;
                 for (let j = i + 1; j < k; j++) {
                     indices[j] = indices[j - 1] + 1;
@@ -248,120 +455,42 @@
         };
     }
 
-    function partition(counts, jokers) {
-        partitionSteps++;
-        if (partitionSteps > MAX_PARTITION_STEPS) {
-            return null; // Abort symmetry explosion immediately
-        }
-
-        let firstC = -1, firstV = -1, found = false;
-
-        for (let v = 1; v <= 13; v++) {
-            for (let c = 0; c < 4; c++) {
-                if (counts[c][v] > 0) {
-                    firstC = c; firstV = v; found = true; break;
-                }
-            }
-            if (found) break;
-        }
-
-        if (!found) {
-            let res = [];
-            if (jokers > 0) res.push(`Leftover Jokers: ${jokers} (can be attached to any set)`);
-            return res;
-        }
-
-        let v = firstV;
-        let c = firstC;
-
-        // BRANCH 1: Runs
-        for (let start = Math.max(1, v - jokers); start <= v; start++) {
-            for (let end = Math.max(start + 2, v); end <= 13; end++) {
-                let missing = 0;
-                let consumed = [];
-                for (let k = start; k <= end; k++) {
-                    if (k >= v && counts[c][k] > 0) consumed.push(k);
-                    else missing++;
-                }
-
-                if (missing <= jokers) {
-                    for (let k of consumed) counts[c][k]--;
-                    let res = partition(counts, jokers - missing);
-                    if (res !== null) {
-                        let str = `Run: ${COLOR_NAMES[c]} ${start} to ${end}` + (missing > 0 ? ` (used ${missing} Joker)` : "");
-                        return [str].concat(res);
-                    }
-                    for (let k of consumed) counts[c][k]++; // Backtrack
-                }
-            }
-        }
-
-        // BRANCH 2: Groups
-        let others = [0, 1, 2, 3].filter(x => x !== c);
-        let groupOptions = [
-            [c, ...others],
-            [c, others[0], others[1]],
-            [c, others[0], others[2]],
-            [c, others[1], others[2]]
-        ];
-
-        for (let g of groupOptions) {
-            let missing = 0;
-            let consumed = [];
-            for (let color of g) {
-                if (counts[color][v] > 0) consumed.push(color);
-                else missing++;
-            }
-            if (missing <= jokers) {
-                for (let color of consumed) counts[color][v]--;
-                let res = partition(counts, jokers - missing);
-                if (res !== null) {
-                    let colorsStr = g.map(x => COLOR_NAMES[x]).join(", ");
-                    let str = `Group: Number ${v} [${colorsStr}]` + (missing > 0 ? ` (used ${missing} Joker)` : "");
-                    return [str].concat(res);
-                }
-                for (let color of consumed) counts[color][v]++; // Backtrack
-            }
-        }
-
-        return null;
-    }
-
-    // --- 3. CORE ASYNC SOLVER ENGINE ---
-
+    // --- 5. ASYNC SOLVER ENGINE ---
     async function solveRummikubAsync(table, hand, onProgress, onComplete) {
-        // Prune completely unplayable cards to shrink search trees
-        const { prunedHand, unplayableHand } = pruneHand(table, hand);
+        let isCancelled = false;
+        window.cancelSearch = () => { isCancelled = true; };
 
-        // Sort pruned hand DESCENDING. High-value point cards first
+        let bestResult = null;
+        const countsVector = new Array(52).fill(0);
+
+        // 1. Baseline Check: Verify if table alone is valid
+        countsVector.fill(0);
+        let tableJokers = 0;
+        for (let t of table) {
+            if (t.isJoker) tableJokers++;
+            else countsVector[tileIdx(t.color, t.value)]++;
+        }
+
+        mrvSteps = 0;
+        let baselineFormations = partitionMRV(countsVector, tableJokers);
+        if (baselineFormations !== null) {
+            bestResult = { used: [], unused: hand, formations: baselineFormations };
+        }
+
+        // If hand is empty, return baseline directly
+        if (hand.length === 0) {
+            onComplete(bestResult, false, false);
+            return;
+        }
+
+        // 2. Pre-prune hand
+        const { prunedHand } = pruneHand(table, hand);
         let sortedHand = [...prunedHand].sort((a, b) => {
             if (a.isJoker !== b.isJoker) return a.isJoker ? -1 : 1;
             return b.value - a.value;
         });
 
-        let isCancelled = false;
-        window.cancelSearch = () => { isCancelled = true; };
-
-        let bestResult = null;
-
-        // Allocate a single static count matrix to eliminate Garbage Collection lag
-        const countsMatrix = Array.from({length: 4}, () => new Array(14).fill(0));
-
-        // Baseline Check: Verify if table itself is valid (our safety fallback)
-        for (let c = 0; c < 4; c++) countsMatrix[c].fill(0);
-        let tableJokers = 0;
-        for (let t of table) {
-            if (t.isJoker) tableJokers++;
-            else countsMatrix[t.color][t.value]++;
-        }
-
-        partitionSteps = 0; // Reset steps limit
-        let baselineFormations = partition(countsMatrix, tableJokers);
-        if (baselineFormations !== null) {
-            bestResult = { used: [], unused: hand, formations: baselineFormations };
-        }
-
-        // Search combinations from sortedHand.length down to 1 (Exhaustive Search)
+        // 3. Search hand subsets from max down to 1
         for (let k = sortedHand.length; k >= 1; k--) {
             if (isCancelled) {
                 onComplete(bestResult, false, true);
@@ -382,40 +511,33 @@
                 if (done) break;
 
                 checkCount++;
-
-                // Pause execution every 10,000 checks to allow browser render loop to fire
-                if (checkCount % 10000 === 0) {
+                if (checkCount % 5000 === 0) {
                     await new Promise(resolve => setTimeout(resolve, 0));
                 }
 
-                let combined = table.concat(subset);
-
-                // Reset static matrix
-                for (let c = 0; c < 4; c++) countsMatrix[c].fill(0);
-                let jokers = 0;
-
-                for (let t of combined) {
-                    if (t.isJoker) jokers++;
-                    else countsMatrix[t.color][t.value]++;
+                countsVector.fill(0);
+                let totalJokers = 0;
+                for (let t of table.concat(subset)) {
+                    if (t.isJoker) totalJokers++;
+                    else countsVector[tileIdx(t.color, t.value)]++;
                 }
 
-                partitionSteps = 0; // Reset steps limit for every combination test
-                let formations = partition(countsMatrix, jokers);
+                mrvSteps = 0;
+                let formations = partitionMRV(countsVector, totalJokers);
                 if (formations !== null) {
                     let usedIds = new Set(subset.map(c => c.id));
                     let unused = hand.filter(c => !usedIds.has(c.id));
-
                     bestResult = { used: subset, unused: unused, formations: formations };
-                    onComplete(bestResult, false, false); // Found absolute max, exit immediately
+                    onComplete(bestResult, false, false);
                     return;
                 }
             }
         }
+
         onComplete(bestResult, false, false);
     }
 
-    // --- 4. UI HANDLERS & NAVIGATION ---
-
+    // --- 6. UI HANDLERS & NAVIGATION ---
     function init() {
         let grid = document.getElementById('number-grid');
         grid.innerHTML = '';
@@ -481,7 +603,7 @@
         list.innerHTML = '';
         let activeArray = currentTab === 'table' ? tableCards : handCards;
         document.getElementById('list-title').innerText = (currentTab === 'table' ? 'Table Cards ' : 'Hand Cards ') + `(${activeArray.length})`;
-
+        
         activeArray.forEach(card => {
             let div = document.createElement('div');
             let colorClass = card.isJoker ? 'joker' : COLORS[card.color];
@@ -504,11 +626,10 @@
             document.getElementById('input-screen').classList.add('hidden');
             document.getElementById('tabs').classList.add('hidden');
             document.getElementById('loading-screen').classList.remove('hidden');
-
-            // Start non-blocking asynchronous solver
+            
             solveRummikubAsync(
-                tableCards,
-                handCards,
+                tableCards, 
+                handCards, 
                 (progressText) => {
                     document.getElementById('progress-text').innerText = progressText;
                 },
@@ -520,12 +641,8 @@
     }
 
     function triggerCancel() {
-        if (window.cancelSearch) {
-            window.cancelSearch();
-        }
+        if (window.cancelSearch) window.cancelSearch();
     }
-
-    // --- 5. RESULT RENDERING ---
 
     function showResults(result, timedOut, cancelled) {
         document.getElementById('loading-screen').classList.add('hidden');
@@ -543,6 +660,7 @@
             document.getElementById('formations-list').innerHTML = `<div style="color:red; font-weight:bold;">No valid formations found! Ensure the table cards actually represent a valid Rummikub board.</div>`;
             document.getElementById('unused-count').innerText = handCards.length;
             document.getElementById('used-count').innerText = 0;
+            document.getElementById('formations-count').innerText = 0;
             document.getElementById('unused-list').innerHTML = handCards.map(drawCardUI).join('');
             document.getElementById('used-list').innerHTML = '';
             return;
@@ -550,9 +668,10 @@
 
         document.getElementById('unused-count').innerText = result.unused.length;
         document.getElementById('used-count').innerText = result.used.length;
+        document.getElementById('formations-count').innerText = result.formations.length;
 
         document.getElementById('unused-list').innerHTML = result.unused.map(drawCardUI).join('') || '<em style="color:#888;">None! Perfect play!</em>';
-        document.getElementById('used-list').innerHTML = result.used.map(drawCardUI).join('') || '<em style="color:#888;">No cards could be played.</em>';
+        document.getElementById('used-list').innerHTML = result.used.map(drawCardUI).join('') || '<em style="color:#888;">No cards played from hand. Table is valid.</em>';
 
         let formationsHTML = result.formations.map(f => `<div class="formation">${f}</div>`).join('');
         document.getElementById('formations-list').innerHTML = formationsHTML;
@@ -564,7 +683,6 @@
         document.getElementById('tabs').classList.remove('hidden');
     }
 
-    // Initialize UI on page load
     init();
 </script>
 </body>
